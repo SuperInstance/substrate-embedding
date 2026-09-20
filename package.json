@@ -1,0 +1,1 @@
+{ "name": "substrate-embedding", "version": "0.0.1", "description": "BGE-Large-compatible embedding client with cache + JEV gate", "main": "src/index.ts", "type": "module", "scripts": { "test": "node --test src/tests/*.test.ts" }, "keywords": ["substrate","embedding","BGE-Large"], "license": "MIT" }
