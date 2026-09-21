@@ -262,10 +262,15 @@ export class MockSemanticEmbedder implements Embedder {
  *    - Any service that POSTs {"inputs": [text]} → {"embeddings": [[floats...]]} */
 export class RemoteEmbedder implements Embedder {
   readonly dim = EMBEDDING_DIM;
+  private url: string;
+  private batchSize: number;
   constructor(
-    private url: string = 'http://localhost:8080/embed',
-    private batchSize: number = 32,
-  ) {}
+    url: string = 'http://localhost:8080/embed',
+    batchSize: number = 32,
+  ) {
+    this.url = url;
+    this.batchSize = batchSize;
+  }
 
   async embed(text: string): Promise<Float32Array> {
     const result = await this.embedBatch([text]);

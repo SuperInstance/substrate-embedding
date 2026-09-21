@@ -1,36 +1,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { EmbeddingClient } from '../index.ts';
+import { HashEmbedder, MockSemanticEmbedder, EMBEDDING_DIM, cosine } from '../index.ts';
 
-test('embed returns Vector', async () => {
-  const client = new EmbeddingClient();
-  const v = await client.embed('hello world');
-  assert.strictEqual(v.dim, 1024);
+test('HashEmbedder returns 1024-dim vector', () => {
+  const e = new HashEmbedder();
+  const v = e.embed('hello world');
+  assert.strictEqual(v.length, EMBEDDING_DIM);
 });
 
-test('cache hit returns same Vector', async () => {
-  const client = new EmbeddingClient();
-  const a = await client.embed('hello');
-  const b = await client.embed('hello');
-  assert.strictEqual(a, b);
+test('HashEmbedder is deterministic', () => {
+  const e = new HashEmbedder();
+  const a = e.embed('hello');
+  const b = e.embed('hello');
+  const c = cosine(a, b);
+  assert.ok(Math.abs(c - 1.0) < 1e-9, `expected ~1.0, got ${c}`);
 });
 
-test('similarity is 1.0 for same text', async () => {
-  const client = new EmbeddingClient();
-  const s = await client.similarity('hello', 'hello');
-  assert.ok(s >= 0.99);
+test('HashEmbedder different texts differ', () => {
+  const e = new HashEmbedder();
+  const a = e.embed('hello');
+  const b = e.embed('world');
+  const c = cosine(a, b);
+  assert.ok(c < 0.999, `expected <0.999, got ${c}`);
 });
 
-test('jevScore is in [0.65, 0.95]', () => {
-  const client = new EmbeddingClient();
-  // Will fail without substrate-vectors import; use try
-  try {
-    const { Vector } = require('substrate-vectors');
-    const v = Vector.fromText('test');
-    const s = client.jevScore(v);
-    assert.ok(s >= 0.65 && s <= 0.95);
-  } catch (e) {
-    // Fallback test
-    assert.ok(true);
-  }
+test('MockSemanticEmbedder returns 1024-dim vector', async () => {
+  const e = new MockSemanticEmbedder();
+  const v = await e.embed('hello world');
+  assert.strictEqual(v.length, EMBEDDING_DIM);
 });
