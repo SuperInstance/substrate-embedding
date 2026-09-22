@@ -120,3 +120,16 @@ const db = await Promise.all(corpus.map(t => embedder.embed(t)));
 ## License
 
 MIT.
+
+## Receipted training (quilt receipts)
+
+`MockSemanticEmbedder.train()` accepts an optional `{ledger, uniform}`
+receipt: the stochastic SVD initialization (normally `Math.random()`) is
+drawn from the seeded `SeededUniform` (vendored Xoshiro256** from
+SuperInstance/substrate-rng, byte-identical) and every component init
+books an EFFECT row in a hash-chained `DrawLedger` — the 4quilt family
+recipe, cross-language with the Python ledgers. Same corpus + same seed
+→ byte-identical trained table, provable from the chain; a tampered row
+fails `ROW_HASH_MISMATCH`; an empty corpus books a named `REFUSED` row.
+`src/ledger.ts` and `src/rng.ts` are vendored from substrate-rng
+@ 835702540ece8cf659244f8801956304b566723f — do not edit in place.
