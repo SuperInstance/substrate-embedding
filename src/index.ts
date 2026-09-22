@@ -2,6 +2,9 @@
  * substrate-embedding: Text embeddings for semantic search
  *
  * BGE-Large compatible: 1024-dim float vectors.
+ * Receipted training: pass {ledger, uniform} to MockSemanticEmbedder.train()
+ * and every SVD init draw is booked as a hash-chained receipt (vendored
+ * 4quilt family recipe from SuperInstance/substrate-rng; see ledger.ts).
  *
  * Two embedders ship here:
  *
@@ -22,6 +25,34 @@
 
 /** Standard BGE-Large embedding dimension. */
 export const EMBEDDING_DIM = 1024;
+
+import { DrawLedger, sha256Hex } from "./ledger.ts";
+import { RNG_SOURCE, Xoshiro256 } from "./rng.ts";
+
+export interface UniformSource {
+  next(): number;
+  serialize(): string;
+}
+
+/** Seeded uniform source backed by the vendored Xoshiro256**. Two
+ * SeededUniforms with the same seed produce byte-identical streams —
+ * which is what makes a trained embedding table replayable from its
+ * receipt chain. */
+export class SeededUniform implements UniformSource {
+  readonly seedLabel: string;
+  private rng: Xoshiro256;
+  constructor(seed: string | bigint) {
+    this.seedLabel = String(seed);
+    this.rng = new Xoshiro256(seed);
+  }
+  next(): number { return this.rng.next(); }
+  serialize(): string { return this.rng.serialize(); }
+}
+
+export interface TrainReceipt {
+  ledger: DrawLedger;
+  uniform: UniformSource;
+}
 
 /** Embedder interface — all embedders produce 1024-d float vectors. */
 export interface Embedder {
@@ -94,14 +125,54 @@ export class MockSemanticEmbedder implements Embedder {
   private contextWindow = 5;
   private minCount = 1;
   private trained = false;
+  private uniformSource: UniformSource | null = null;
 
   constructor() {
     this.cooccurrence = new Float32Array(0);
     this.wordVectors = new Float32Array(0);
   }
 
-  /** Train on a corpus of documents. Each doc is a string. */
-  train(docs: string[], contextWindow: number = 5, minCount: number = 2): void {
+  /** Train on a corpus of documents. Each doc is a string.
+   *
+   * opts.receipt: when BOTH ledger and uniform are given, the stochastic
+   * SVD initialization is drawn from `uniform` and every component init
+   * books an EFFECT row: same corpus + same seed → same table, provable
+   * from the chain. Give only one and train() throws (loud, not silent). */
+  train(
+    docs: string[],
+    contextWindow: number = 5,
+    minCount: number = 2,
+    opts?: { receipt?: TrainReceipt },
+  ): void {
+    const receipt = opts?.receipt;
+    if (receipt && (!receipt.ledger || !receipt.uniform)) {
+      throw new Error("train: receipt requires BOTH ledger and uniform");
+    }
+    this.uniformSource = receipt ? receipt.uniform : null;
+    let ledger: DrawLedger | null = null;
+    try {
+      if (receipt) {
+        ledger = receipt.ledger;
+        ledger.bind(
+          "mock-semantic-svd/v1",
+          receipt.uniform instanceof SeededUniform ? receipt.uniform.seedLabel : "custom",
+          receipt.uniform.serialize(),
+          {
+            corpus_sha256: sha256Hex(docs.join("\n")),
+            doc_count: docs.length,
+            context_window: contextWindow,
+            min_count: minCount,
+            rng_source: receipt.uniform instanceof SeededUniform ? RNG_SOURCE : "custom",
+          },
+        );
+      }
+      this.trainInner(docs, contextWindow, minCount, ledger);
+    } finally {
+      this.uniformSource = null;
+    }
+  }
+
+  private trainInner(docs: string[], contextWindow: number, minCount: number, ledger: DrawLedger | null): void {
     this.contextWindow = contextWindow;
     this.minCount = minCount;
     const wordCounts = new Map<string, number>();
@@ -144,6 +215,7 @@ export class MockSemanticEmbedder implements Embedder {
     }
     if (totalPairs === 0) {
       // Empty corpus — fall back to hash
+      if (ledger) ledger.refuse("empty_corpus", { doc_count: docs.length });
       this.trained = false;
       return;
     }
@@ -171,19 +243,35 @@ export class MockSemanticEmbedder implements Embedder {
         }
       }
     }
-    // SVD: use the truncated power iteration method
-    this.wordVectors = this.truncatedSVD(pmiMatrix, V, this.dim);
+    // SVD: use the truncated power iteration method. Each component's
+    // init vector is drawn from the receipted uniform source when set.
+    this.wordVectors = this.truncatedSVD(pmiMatrix, V, this.dim, ledger);
+    if (ledger) {
+      const bytes = new Uint8Array(this.wordVectors.buffer, this.wordVectors.byteOffset, this.wordVectors.byteLength);
+      ledger.view([{ path: "wordVectors.f32", sha256: sha256Hex(bytes) }]);
+    }
     this.trained = true;
   }
 
-  private truncatedSVD(matrix: Float32Array, rows: number, k: number): Float32Array {
+  private truncatedSVD(matrix: Float32Array, rows: number, k: number, ledger: DrawLedger | null = null): Float32Array {
     // Power iteration with deflation to get top-k singular vectors
     const vectors = new Float32Array(rows * k);
     let residual = new Float32Array(matrix);
     for (let i = 0; i < k; i++) {
-      // Initialize random vector
+      // Initialize random vector — THE stochastic decision being receipted.
+      const stateBefore = this.uniformSource ? this.uniformSource.serialize() : "";
+      let firstDraw = 0;
       let v = new Float32Array(rows);
-      for (let j = 0; j < rows; j++) v[j] = Math.random() - 0.5;
+      for (let j = 0; j < rows; j++) {
+        const u = this.uniformSource ? this.uniformSource.next() : Math.random();
+        if (j === 0) firstDraw = u;
+        v[j] = u - 0.5;
+      }
+      const stateAfter = this.uniformSource ? this.uniformSource.serialize() : "";
+      if (ledger && this.uniformSource) {
+        ledger.draw(i, "svd_init_uniform", { rows, draws: rows }, firstDraw, stateBefore, stateAfter);
+        if (i % 128 === 127) ledger.heartbeat(i + 1, "svd components");
+      }
       // Power iterate
       for (let iter = 0; iter < 30; iter++) {
         const newV = new Float32Array(rows);
